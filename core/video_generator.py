@@ -239,11 +239,36 @@ class QualityAssessor(nn.Module):
         )
     
     def forward(self, generated_frame: torch.Tensor, reference_frame: torch.Tensor) -> torch.Tensor:
-        # Extract features
-        gen_features = self.feature_extractor(generated_frame.cpu().numpy())
-        ref_features = self.feature_extractor(reference_frame.cpu().numpy())
+        """
+        Args:
+            generated_frame: Shape (C, H, W) or (B, C, H, W)
+            reference_frame: Shape (C, H, W) or (B, C, H, W)
+        """
+        # Add batch dimension if needed
+        if len(generated_frame.shape) == 3:
+            generated_frame = generated_frame.unsqueeze(0)
+        if len(reference_frame.shape) == 3:
+            reference_frame = reference_frame.unsqueeze(0)
+            
+        # Convert to numpy and correct format (B, H, W, C)
+        gen_np = generated_frame.permute(0, 2, 3, 1).cpu().numpy()
+        ref_np = reference_frame.permute(0, 2, 3, 1).cpu().numpy()
         
-        # Convert to torch tensors
+        # Ensure values are in [0, 255] range
+        if gen_np.max() <= 1.0:
+            gen_np = (gen_np * 255).clip(0, 255).astype(np.uint8)
+        if ref_np.max() <= 1.0:
+            ref_np = (ref_np * 255).astype(np.uint8)
+        
+        # Extract features using TensorFlow
+        gen_features = self.feature_extractor(gen_np)
+        ref_features = self.feature_extractor(ref_np)
+        
+        # Convert TensorFlow tensors to NumPy arrays
+        gen_features = gen_features.numpy()
+        ref_features = ref_features.numpy()
+        
+        # Convert to PyTorch tensors
         gen_features = torch.from_numpy(gen_features).float()
         ref_features = torch.from_numpy(ref_features).float()
         
@@ -358,10 +383,17 @@ class QualityMetrics:
         return np.mean(stability_scores)
     
     def calculate_motion_smoothness(self, 
-                                  flow_field: torch.Tensor,
+                                  flow_field: Optional[torch.Tensor],
                                   window_size: int = 5) -> float:
         """Calculate smoothness of motion between frames"""
-        self.motion_history.append(flow_field.cpu().numpy())
+        # Return default smoothness if no flow field
+        if flow_field is None:
+            return 1.0
+            
+        # Convert flow field to numpy
+        flow_np = flow_field.cpu().numpy() if isinstance(flow_field, torch.Tensor) else flow_field
+        
+        self.motion_history.append(flow_np)
         if len(self.motion_history) > window_size:
             self.motion_history.pop(0)
             
@@ -503,20 +535,46 @@ class FaceSwapper:
         
     def extract_face_features(self, image: np.ndarray):
         """Extract facial features and landmarks"""
+        print("Input image shape:", image.shape)
+        print("Input image dtype:", image.dtype)
+        
+        # Ensure image is uint8 and has 3 channels
+        if image.dtype != np.uint8:
+            # Fix the dtype error here
+            image = (image * 255).clip(0, 255).astype(np.uint8)
+        
+        # Handle different image formats
+        if isinstance(image, torch.Tensor):
+            image = image.cpu().numpy()
+            
+        if len(image.shape) == 4:  # (batch, channels, height, width)
+            image = image.squeeze(0).transpose(1, 2, 0)
+        elif len(image.shape) == 3 and image.shape[0] == 3:  # (channels, height, width)
+            image = image.transpose(1, 2, 0)
+            
+        # Ensure 3 channels
+        if len(image.shape) == 2:
+            image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        elif image.shape[2] == 1:
+            image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        elif image.shape[2] == 4:
+            image = cv2.cvtColor(image, cv2.COLOR_RGBA2BGR)
+        elif image.shape[2] != 3:
+            raise ValueError(f"Invalid number of channels: {image.shape[2]}")
+            
+        # Rest of the function remains the same
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         faces = self.face_detector(gray)
-        
         if not faces:
             return None, None
             
         landmarks = self.shape_predictor(gray, faces[0])
-        # Use the face recognition model if available, otherwise return None for descriptor
+        
         if hasattr(self, 'face_recognition_model'):
             face_descriptor = self.face_recognition_model.compute_face_descriptor(image, landmarks)
-        else:
-            face_descriptor = None
-        
-        return face_descriptor, self._landmarks_to_np(landmarks)
+            return face_descriptor, self._landmarks_to_np(landmarks)
+            
+        return None, self._landmarks_to_np(landmarks)
     
     def _landmarks_to_np(self, landmarks):
         """Convert dlib landmarks to numpy array"""
@@ -530,9 +588,23 @@ class FaceSwapper:
             triangle_points.append(points[point_idx])
         return np.array(triangle_points, dtype=np.float32)
 
+    def ensure_three_channels(self, image):
+        if len(image.shape) == 2:  # Grayscale image
+            image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+            print("Image Shape:", image.shape)
+            print("Image Dtype:", image.dtype)
+        elif image.shape[2] == 4:  # Image with alpha channel
+            image = cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
+            print("Image Shape:", image.shape)
+            print("Image Dtype:", image.dtype)
+
+        return image
+
 
     def swap_faces(self, source_img: np.ndarray, target_img: np.ndarray) -> np.ndarray:
         """Perform face swapping"""
+        source_img = self.ensure_three_channels(source_img)
+
         source_descriptor, source_landmarks = self.extract_face_features(source_img)
         target_descriptor, target_landmarks = self.extract_face_features(target_img)
         
@@ -712,41 +784,92 @@ class StyleTransfer(nn.Module):
         return F.mse_loss(target_gram, style_gram)
 
 class ExpressionTransfer:
-    """Control and transfer facial expressions"""
     def __init__(self):
         self.face_mesh = mp.solutions.face_mesh.FaceMesh(
             static_image_mode=False,
             max_num_faces=1,
             min_detection_confidence=0.5
         )
-        
-    def extract_expression(self, image: np.ndarray) -> Dict[str, float]:
-        """Extract expression parameters from face"""
-        results = self.face_mesh.process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
-        if not results.multi_face_landmarks:
-            return {}
-            
-        landmarks = results.multi_face_landmarks[0].landmark
-        
-        # Calculate expression parameters
-        expressions = {
-            'smile': self._calculate_smile_intensity(landmarks),
-            'eye_open': self._calculate_eye_openness(landmarks),
-            'mouth_open': self._calculate_mouth_openness(landmarks),
-            'brow_raise': self._calculate_brow_raise(landmarks)
-        }
-        
-        return expressions
-    
-    def transfer_expression(self, source_img: np.ndarray, 
-                          target_img: np.ndarray,
+
+    def extract_expression(self, image: np.ndarray) -> np.ndarray:
+        """Extract facial expression from image"""
+        # Ensure image is uint8
+        if image.dtype != np.uint8:
+            if image.max() <= 1.0:
+                image = (image * 255).clip(0, 255).astype(np.uint8)
+            else:
+                image = image.clip(0, 255).astype(np.uint8)
+
+        # Convert to RGB if needed
+        if len(image.shape) == 3 and image.shape[2] == 3:
+            # Check if image is already RGB
+            if np.array_equal(image[:,:,0], cv2.split(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))[0]):
+                rgb_image = image
+            else:
+                rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        else:
+            raise ValueError("Image must be BGR/RGB with 3 channels")
+
+        results = self.face_mesh.process(rgb_image)
+        return results
+
+    def transfer_expression(self, 
+                          source_img: np.ndarray, 
+                          target_img: np.ndarray, 
                           intensity: float = 1.0) -> np.ndarray:
         """Transfer expression from source to target"""
+        # Convert images to uint8 if needed
+        if source_img.dtype != np.uint8:
+            source_img = (source_img * 255).clip(0, 255).astype(np.uint8)
+        if target_img.dtype != np.uint8:
+            target_img = (target_img * 255).clip(0, 255).astype(np.uint8)
+
+        # Extract expressions
         source_expr = self.extract_expression(source_img)
         target_expr = self.extract_expression(target_img)
-        
-        if not source_expr or not target_expr:
+
+        if not source_expr.multi_face_landmarks or not target_expr.multi_face_landmarks:
             return target_img
+            
+        # Get landmarks
+        source_landmarks = source_expr.multi_face_landmarks[0].landmark
+        target_landmarks = target_expr.multi_face_landmarks[0].landmark
+        
+        # Create modified landmarks with expression transfer
+        modified_landmarks = []
+        for i, (s_lm, t_lm) in enumerate(zip(source_landmarks, target_landmarks)):
+            # Calculate the difference in expression
+            dx = (s_lm.x - t_lm.x) * intensity
+            dy = (s_lm.y - t_lm.y) * intensity
+            dz = (s_lm.z - t_lm.z) * intensity
+            
+            # Create new landmark with transferred expression
+            new_lm = type(s_lm)()
+            new_lm.x = t_lm.x + dx
+            new_lm.y = t_lm.y + dy
+            new_lm.z = t_lm.z + dz
+            modified_landmarks.append(new_lm)
+        
+        # Convert landmarks to numpy array for warping
+        target_points = np.float32([[lm.x * target_img.shape[1], lm.y * target_img.shape[0]] 
+                                  for lm in target_landmarks])
+        modified_points = np.float32([[lm.x * target_img.shape[1], lm.y * target_img.shape[0]] 
+                                    for lm in modified_landmarks])
+        
+        # Create warping transform
+        transform = cv2.estimateAffinePartial2D(target_points, modified_points)[0]
+        
+        # Apply warping
+        if transform is not None:
+            result_img = cv2.warpAffine(
+                target_img,
+                transform,
+                (target_img.shape[1], target_img.shape[0]),
+                borderMode=cv2.BORDER_REPLICATE
+            )
+            return result_img
+            
+        return target_img
             
         # Calculate expression differences
         expr_diff = {k: (source_expr[k] - target_expr[k]) * intensity 
@@ -877,14 +1000,13 @@ class AdvancedVideoGenerator(nn.Module):
         if hasattr(self, 'real_time_processor'):
             self.real_time_processor.stop()
 
-    def forward(self, 
-                source_images: Union[torch.Tensor, List[torch.Tensor]],
-                driving_frames: List[torch.Tensor],
-                background_image: Optional[torch.Tensor] = None,
-                style_image: Optional[torch.Tensor] = None,
-                expression_intensity: float = 1.0,
-                enable_stabilization: bool = True,
-                swap_faces: bool = True) -> Dict:
+    def forward(self, source_images: Union[torch.Tensor, List[torch.Tensor]],
+               driving_frames: List[torch.Tensor],
+               background_image: Optional[torch.Tensor] = None,
+               style_image: Optional[torch.Tensor] = None,
+               expression_intensity: float = 1.0,
+               enable_stabilization: bool = True,
+               swap_faces: bool = True) -> Dict:
         """
         Generate video with all advanced features.
         
@@ -926,19 +1048,44 @@ class AdvancedVideoGenerator(nn.Module):
             driving_np = driving_frame.cpu().numpy()
             source_np = [img.cpu().numpy() for img in source_images]
             
+            # Ensure proper shape for processing
+            if driving_np.shape[0] == 1:  # Remove batch dimension if present
+                driving_np = driving_np[0]
+            if driving_np.shape[0] == 3:  # Convert from CHW to HWC
+                driving_np = np.transpose(driving_np, (1, 2, 0))
+                
+            source_np = [np.transpose(img[0], (1, 2, 0)) if img.shape[0] == 1 else 
+                        np.transpose(img, (1, 2, 0)) if img.shape[0] == 3 else img 
+                        for img in source_np]
+            
+            # Convert to uint8 [0-255]
+            driving_np = (driving_np * 255).clip(0, 255).astype(np.uint8)
+            source_np = [(img * 255).clip(0, 255).astype(np.uint8) for img in source_np]
+        
+            
             # 1. Face Detection and Landmark Extraction
+            print("Driving Frame Shape:", driving_np.shape)
             face_landmarks = self.multi_face_processor.detect_faces(driving_np)
             results['landmarks'].append(face_landmarks)
+            
             
             # 2. Face Swapping (if enabled)
             processed_frame = driving_np.copy()
             if swap_faces:
                 for face_idx, landmarks in enumerate(face_landmarks):
                     if face_idx < len(source_np):
+                        source_img = source_np[face_idx]
+                        if len(source_img.shape) == 2:  # Grayscale image
+                            source_img = cv2.cvtColor(source_img, cv2.COLOR_GRAY2BGR)
+                        elif source_img.shape[2] == 4:  # Image with alpha channel
+                            source_img = cv2.cvtColor(source_img, cv2.COLOR_BGRA2BGR)
                         processed_frame = self.face_swapper.swap_faces(
-                            source_np[face_idx],
+                            source_img,
                             processed_frame
                         )
+            
+            # Convert back to float32 [0-1] for further processing
+            processed_frame = processed_frame.astype(np.float32) / 255.0
             
             # 3. Expression Transfer
             if expression_intensity > 0:
@@ -990,16 +1137,29 @@ class AdvancedVideoGenerator(nn.Module):
                 )
             
             # 8. Quality Assessment
-            quality_score = self.quality_assessor(
-                torch.from_numpy(processed_frame).float(),
-                driving_frame
-            )
+            try:
+                processed_tensor = torch.from_numpy(processed_frame).float()
+                if len(processed_tensor.shape) == 3:
+                    processed_tensor = processed_tensor.permute(2, 0, 1)  # HWC to CHW
+                
+                quality_score = self.quality_assessor(
+                    processed_tensor.unsqueeze(0),  # Add batch dimension
+                    driving_frame
+                )
+            except Exception as e:
+                print(f"Warning: Quality assessment failed - {str(e)}")
+                quality_score = torch.tensor([0.0])
+            
             stability_score = self.quality_metrics.calculate_landmark_stability(
                 face_landmarks[0] if face_landmarks else None
             )
-            smoothness_score = self.quality_metrics.calculate_motion_smoothness(
-                self.dense_motion_network.last_flow if hasattr(self.dense_motion_network, 'last_flow') else None
-            )
+            # Get motion flow field if available
+            flow_field = getattr(self.dense_motion_network, 'last_flow', None)
+            
+            # Calculate smoothness score
+            smoothness_score = self.quality_metrics.calculate_motion_smoothness(flow_field)
+            
+            
             
             # Store results
             results['frames'].append(processed_frame)
@@ -1009,7 +1169,12 @@ class AdvancedVideoGenerator(nn.Module):
             
             prev_frame = processed_frame
             self.last_processed_frame = processed_frame
-        
+
+            # Before adding to results, ensure proper dtype
+            if 'frames' in results:
+                results['frames'] = [frame.astype(np.float32) / 255.0 if isinstance(frame, np.ndarray) else frame 
+                                for frame in results['frames']]
+                
         return results
     
     def process_single_frame(self, 
@@ -1083,16 +1248,51 @@ class AdvancedVideoGenerator(nn.Module):
         source_expr = self.expression_transfer.extract_expression(source_frame)
         gen_expr = self.expression_transfer.extract_expression(generated_frame)
         
-        if not source_expr or not gen_expr:
+        # Check if we have valid face landmarks
+        if (not source_expr.multi_face_landmarks or 
+            not gen_expr.multi_face_landmarks):
             return 0.0
         
-        # Calculate mean squared error of expression parameters
-        expr_diff = sum(
-            (source_expr[k] - gen_expr[k]) ** 2 
-            for k in source_expr.keys()
-        ) / len(source_expr)
+        # Get landmarks from first face
+        source_landmarks = source_expr.multi_face_landmarks[0].landmark
+        gen_landmarks = gen_expr.multi_face_landmarks[0].landmark
         
-        return 1.0 / (1.0 + expr_diff)  # Convert to similarity score
+        # Calculate differences in key expression features
+        expr_diff = 0.0
+        
+        # Compare mouth landmarks (indices 0-17)
+        mouth_indices = range(0, 17)
+        for idx in mouth_indices:
+            s_pt = source_landmarks[idx]
+            g_pt = gen_landmarks[idx]
+            expr_diff += ((s_pt.x - g_pt.x)**2 + 
+                        (s_pt.y - g_pt.y)**2 + 
+                        (s_pt.z - g_pt.z)**2)
+        
+        # Compare eye landmarks (indices 33-46 for left eye, 362-374 for right eye)
+        eye_indices = list(range(33, 46)) + list(range(362, 374))
+        for idx in eye_indices:
+            s_pt = source_landmarks[idx]
+            g_pt = gen_landmarks[idx]
+            expr_diff += ((s_pt.x - g_pt.x)**2 + 
+                        (s_pt.y - g_pt.y)**2 + 
+                        (s_pt.z - g_pt.z)**2)
+        
+        # Compare eyebrow landmarks (indices 46-55 for right eyebrow, 285-295 for left eyebrow)
+        brow_indices = list(range(46, 55)) + list(range(285, 295))
+        for idx in brow_indices:
+            s_pt = source_landmarks[idx]
+            g_pt = gen_landmarks[idx]
+            expr_diff += ((s_pt.x - g_pt.x)**2 + 
+                        (s_pt.y - g_pt.y)**2 + 
+                        (s_pt.z - g_pt.z)**2)
+        
+        # Normalize by number of points compared
+        total_points = len(mouth_indices) + len(eye_indices) + len(brow_indices)
+        expr_diff /= total_points
+        
+        # Convert to similarity score (1 / (1 + diff))
+        return 1.0 / (1.0 + expr_diff)
     
     def _calculate_style_consistency(self,
                                    generated_frame: np.ndarray,
@@ -1117,52 +1317,57 @@ class AdvancedVideoGenerator(nn.Module):
     
 # Example usage
 def main():
-    # Configuration
     config = AdvancedVideoConfig(
         max_faces=3,
         interpolation_factor=2,
         real_time_buffer_size=30
     )
     
-    # Initialize generator
     generator = AdvancedVideoGenerator(config)
     
-    # Option 1: Test with webcam (real-time processing)
-    use_webcam = False  # Set to False to test with image files
-    
+    use_webcam = True  # Set to True for webcam testing
+   
     if use_webcam:
-        # Initialize webcam
         cap = cv2.VideoCapture(0)
-        if not cap.isOpened():
-            print("Error: Could not open webcam")
-            return
-            
-        # Load source image for face swapping
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        
         try:
-            source_image = cv2.imread('source.jpg')
-            if source_image is None:
+            # Load and prepare source image
+            source_img = cv2.imread('source.jpg')
+            if source_img is None:
                 raise FileNotFoundError("Could not load source.jpg")
-            source_image = cv2.cvtColor(source_image, cv2.COLOR_BGR2RGB)
-            generator.start_real_time([source_image])
             
-            print("Starting real-time processing...")
-            print("Press 'q' to quit")
+            # Process source image
+            source_img = cv2.resize(source_img, (256, 256))
+            source_img = cv2.cvtColor(source_img, cv2.COLOR_BGR2RGB)
+            source_img = source_img.astype(np.uint8)  # Ensure uint8 type
+            
+            # Start real-time processing with source image
+            generator.start_real_time([source_img])  # Pass numpy array directly
+            
+            print("Starting real-time processing. Press 'q' to quit.")
             
             while True:
                 ret, frame = cap.read()
                 if not ret:
                     break
-                    
-                # Add frame to processing queue
-                generator.real_time_processor.add_frame(frame)
                 
-                # Get processed frame
-                processed = generator.real_time_processor.get_processed_frame()
+                # Process frame
+                frame = cv2.resize(frame, (256, 256))
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                frame = frame.astype(np.uint8)  # Ensure uint8 type
+                
+                # Process frame
+                processed = generator.process_single_frame(frame)
+                
                 if processed is not None:
-                    # Convert processed frame back to BGR for display
+                    # Convert back to BGR for display
+                    if processed.max() <= 1.0:
+                        processed = (processed * 255).astype(np.uint8)
                     processed_bgr = cv2.cvtColor(processed, cv2.COLOR_RGB2BGR)
                     cv2.imshow('Processed', processed_bgr)
-                    
+                
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
                     
@@ -1171,37 +1376,33 @@ def main():
             cap.release()
             cv2.destroyAllWindows()
             
+    
     else:
-        # Option 2: Test with static images
+        # Static image processing
         try:
-            # Load source and driving images
             source_img = cv2.imread('source.jpg')
             driving_img = cv2.imread('driving.jpg')
             
             if source_img is None or driving_img is None:
                 raise FileNotFoundError("Could not load source.jpg or driving.jpg")
-                
-            # Convert to RGB and ensure 3 channels
-            source_img = cv2.cvtColor(source_img, cv2.COLOR_BGR2RGB)
-            driving_img = cv2.cvtColor(driving_img, cv2.COLOR_BGR2RGB)
             
-            # Ensure images are float32 and in range [0, 1]
-            source_img = source_img.astype(np.float32) / 255.0
-            driving_img = driving_img.astype(np.float32) / 255.0
-            
-            # Resize images if needed
-            target_size = (256, 256)  # or whatever size your model expects
+            # Process images consistently
+            target_size = (256, 256)
             source_img = cv2.resize(source_img, target_size)
             driving_img = cv2.resize(driving_img, target_size)
             
-            # Convert to torch tensors with correct shape [B, C, H, W]
-            source_tensor = torch.from_numpy(source_img).permute(2, 0, 1).unsqueeze(0)
-            driving_tensor = torch.from_numpy(driving_img).permute(2, 0, 1).unsqueeze(0)
+            # Convert to RGB
+            source_img = cv2.cvtColor(source_img, cv2.COLOR_BGR2RGB)
+            driving_img = cv2.cvtColor(driving_img, cv2.COLOR_BGR2RGB)
             
-            print("Source tensor shape:", source_tensor.shape)
-            print("Driving tensor shape:", driving_tensor.shape)
+            # Convert to tensors [0-1] range
+            source_tensor = torch.from_numpy(source_img).float().permute(2, 0, 1).unsqueeze(0) / 255.0
+            driving_tensor = torch.from_numpy(driving_img).float().permute(2, 0, 1).unsqueeze(0) / 255.0
             
-            # Process single frame
+            print("Processing images...")
+            print(f"Source tensor shape: {source_tensor.shape}")
+            print(f"Driving tensor shape: {driving_tensor.shape}")
+            
             results = generator(
                 source_images=source_tensor,
                 driving_frames=[driving_tensor],
@@ -1210,12 +1411,18 @@ def main():
                 swap_faces=True
             )
             
-            # Display results
             if results['frames']:
                 processed_frame = results['frames'][0]
-                # Convert back to uint8 range [0, 255]
-                processed_frame = (processed_frame * 255).astype(np.uint8)
+                if isinstance(processed_frame, torch.Tensor):
+                    processed_frame = processed_frame.cpu().numpy()
+                processed_frame = (processed_frame * 255).clip(0, 255).astype(np.uint8)
                 processed_bgr = cv2.cvtColor(processed_frame, cv2.COLOR_RGB2BGR)
+                
+                # Save the result
+                cv2.imwrite('output.jpg', processed_bgr)
+                print("Result saved as output.jpg")
+                
+                # Display the result
                 cv2.imshow('Processed Frame', processed_bgr)
                 cv2.waitKey(0)
                 cv2.destroyAllWindows()
@@ -1223,7 +1430,7 @@ def main():
         except Exception as e:
             print(f"Error processing images: {str(e)}")
             import traceback
-            traceback.print_exc()  # Print full error traceback
+            traceback.print_exc()
 
 if __name__ == "__main__":
     main()
