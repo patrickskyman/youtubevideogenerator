@@ -8,6 +8,7 @@ from typing import List, Tuple, Dict, Optional, Union
 from dataclasses import dataclass
 import tensorflow as tf
 from PIL import Image
+from absl import logging 
 import queue
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -24,7 +25,7 @@ class AdvancedVideoConfig:
     # Image settings
     image_size: Tuple[int, int] = (256, 256)
     num_channels: int = 3
-    num_kp: int = 468  # MediaPipe Face Mesh landmarks
+    num_kp: int = 478  # MediaPipe Face Mesh landmarks
     
     # Network architecture
     block_expansion: int = 64
@@ -194,27 +195,40 @@ class DenseMotionNetwork(nn.Module):
         return gx * gy
     
 class FaceMeshDetector:
-    """MediaPipe Face Mesh implementation for precise facial landmark detection"""
-    def __init__(self):
+    def __init__(self, image_height=256, image_width=256):
         self.mp_face_mesh = mp.solutions.face_mesh
         self.face_mesh = self.mp_face_mesh.FaceMesh(
             static_image_mode=False,
             max_num_faces=1,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5
+            refine_landmarks=True,
+            min_detection_confidence=0.7,
+            min_tracking_confidence=0.7
         )
+        self.image_width = image_width
+        self.image_height = image_height
 
     def detect_landmarks(self, image: np.ndarray) -> np.ndarray:
-        """Extract facial landmarks using MediaPipe Face Mesh"""
+        # Ensure image is RGB and within bounds
+        if image.shape[0] != self.image_height or image.shape[1] != self.image_width:
+            image = cv2.resize(image, (self.image_width, self.image_height))
         image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        
         results = self.face_mesh.process(image_rgb)
+        landmarks = np.zeros((478, 3), dtype=np.float32)  # Use 478 3D landmarks (x, y, z)
         
-        landmarks = np.zeros((468, 3))  # 468 3D landmarks
         if results.multi_face_landmarks:
+            valid_landmarks = []
             for idx, landmark in enumerate(results.multi_face_landmarks[0].landmark):
-                landmarks[idx] = [landmark.x, landmark.y, landmark.z]
-        
-        return landmarks
+                if idx < 478 and not (np.isnan(landmark.x) or np.isnan(landmark.y) or np.isnan(landmark.z)):
+                    valid_landmarks.append([landmark.x, landmark.y, landmark.z])
+            if not valid_landmarks:
+                print("No valid landmarks detected.")
+                return np.zeros((478, 3), dtype=np.float32)
+            landmarks = np.array(valid_landmarks, dtype=np.float32)
+            if len(landmarks) < 478:
+                landmarks = np.pad(landmarks, ((0, 478 - len(landmarks)), (0, 0)), mode='constant')
+            return landmarks
+        return np.zeros((478, 3), dtype=np.float32)
 
 class QualityAssessor(nn.Module):
     """Assess the quality of generated frames"""
@@ -526,183 +540,470 @@ class RealTimeProcessor:
             except queue.Empty:
                 continue
 
-class FaceSwapper:
-    """Handle face swapping between source and target"""
+class EnhancedFaceSwapper:
+    """Improved face swapping between source and target images with special eye region handling"""
     def __init__(self):
         self.face_detector = dlib.get_frontal_face_detector()
         self.shape_predictor = dlib.shape_predictor('models/shape_predictor_68_face_landmarks.dat')
-        self.face_recognition_model = dlib.face_recognition_model_v1('models/dlib_face_recognition_resnet_model_v1.dat')
         
-    def extract_face_features(self, image: np.ndarray):
-        """Extract facial features and landmarks"""
-        print("Input image shape:", image.shape)
-        print("Input image dtype:", image.dtype)
-        
-        # Ensure image is uint8 and has 3 channels
-        if image.dtype != np.uint8:
-            # Fix the dtype error here
-            image = (image * 255).clip(0, 255).astype(np.uint8)
-        
-        # Handle different image formats
-        if isinstance(image, torch.Tensor):
-            image = image.cpu().numpy()
-            
-        if len(image.shape) == 4:  # (batch, channels, height, width)
-            image = image.squeeze(0).transpose(1, 2, 0)
-        elif len(image.shape) == 3 and image.shape[0] == 3:  # (channels, height, width)
-            image = image.transpose(1, 2, 0)
-            
-        # Ensure 3 channels
-        if len(image.shape) == 2:
-            image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-        elif image.shape[2] == 1:
-            image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-        elif image.shape[2] == 4:
-            image = cv2.cvtColor(image, cv2.COLOR_RGBA2BGR)
-        elif image.shape[2] != 3:
-            raise ValueError(f"Invalid number of channels: {image.shape[2]}")
-            
-        # Rest of the function remains the same
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        faces = self.face_detector(gray)
-        if not faces:
-            return None, None
-            
-        landmarks = self.shape_predictor(gray, faces[0])
-        
-        if hasattr(self, 'face_recognition_model'):
-            face_descriptor = self.face_recognition_model.compute_face_descriptor(image, landmarks)
-            return face_descriptor, self._landmarks_to_np(landmarks)
-            
-        return None, self._landmarks_to_np(landmarks)
-    
-    def _landmarks_to_np(self, landmarks):
-        """Convert dlib landmarks to numpy array"""
-        return np.array([[p.x, p.y] for p in landmarks.parts()])
-    
-    def _get_triangle_points(self, points: np.ndarray, triangle: np.ndarray) -> np.ndarray:
-        """Get points forming a triangle"""
-        triangle_points = []
-        for i in range(3):
-            point_idx = triangle[i]
-            triangle_points.append(points[point_idx])
-        return np.array(triangle_points, dtype=np.float32)
-
-    def ensure_three_channels(self, image):
-        if len(image.shape) == 2:  # Grayscale image
-            image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-            print("Image Shape:", image.shape)
-            print("Image Dtype:", image.dtype)
-        elif image.shape[2] == 4:  # Image with alpha channel
-            image = cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
-            print("Image Shape:", image.shape)
-            print("Image Dtype:", image.dtype)
-
-        return image
-
-
     def swap_faces(self, source_img: np.ndarray, target_img: np.ndarray) -> np.ndarray:
-        """Perform face swapping"""
-        source_img = self.ensure_three_channels(source_img)
-
-        source_descriptor, source_landmarks = self.extract_face_features(source_img)
-        target_descriptor, target_landmarks = self.extract_face_features(target_img)
+        """Enhanced face swapping with special handling for eye regions to prevent double-eye effect"""
+        print("Starting enhanced face swap with eye region handling...")
         
-        if source_landmarks is None or target_landmarks is None:
+        # 1. Validate and prepare images
+        if source_img is None or target_img is None:
+            print("Error: One or both input images are None")
+            return target_img if target_img is not None else np.zeros((256, 256, 3), dtype=np.uint8)
+        
+        # Ensure 3-channel images
+        if len(source_img.shape) != 3 or source_img.shape[2] != 3:
+            source_img = cv2.cvtColor(source_img, cv2.COLOR_GRAY2BGR) if len(source_img.shape) == 2 else cv2.cvtColor(source_img, cv2.COLOR_BGRA2BGR)
+        if len(target_img.shape) != 3 or target_img.shape[2] != 3:
+            target_img = cv2.cvtColor(target_img, cv2.COLOR_GRAY2BGR) if len(target_img.shape) == 2 else cv2.cvtColor(target_img, cv2.COLOR_BGRA2BGR)
+            
+        # 2. Detect faces with Dlib
+        source_gray = cv2.cvtColor(source_img, cv2.COLOR_BGR2GRAY)
+        target_gray = cv2.cvtColor(target_img, cv2.COLOR_BGR2GRAY)
+        
+        source_faces = self.face_detector(source_gray)
+        target_faces = self.face_detector(target_gray)
+        
+        if len(source_faces) == 0 or len(target_faces) == 0:
+            print(f"Found {len(source_faces)} face(s) in source image and {len(target_faces)} face(s) in target image")
             return target_img
             
-        # Create Delaunay triangulation for face mesh
-        rect = cv2.boundingRect(target_landmarks)
+        print(f"Found {len(source_faces)} face(s) in source image")
+        print(f"Found {len(target_faces)} face(s) in target image")
+        
+        # 3. Get facial landmarks using Dlib (68 points)
+        source_shape = self.shape_predictor(source_gray, source_faces[0])
+        target_shape = self.shape_predictor(target_gray, target_faces[0])
+        
+        source_landmarks = np.array([[p.x, p.y] for p in source_shape.parts()], dtype=np.float32)
+        target_landmarks = np.array([[p.x, p.y] for p in target_shape.parts()], dtype=np.float32)
+        
+        # 4. Extract eye landmarks
+        # Left eye indices: 36-41, Right eye indices: 42-47
+        left_eye_src = source_landmarks[36:42]
+        right_eye_src = source_landmarks[42:48]
+        left_eye_tgt = target_landmarks[36:42]
+        right_eye_tgt = target_landmarks[42:48]
+        
+        # Create debug visualization
+        debug_img = target_img.copy()
+        # Draw all landmarks
+        for point in target_landmarks:
+            x, y = int(point[0]), int(point[1])
+            cv2.circle(debug_img, (x, y), 2, (0, 255, 0), -1)
+        
+        # Highlight eye landmarks in a different color
+        for eye_points in [left_eye_tgt, right_eye_tgt]:
+            for point in eye_points:
+                x, y = int(point[0]), int(point[1])
+                cv2.circle(debug_img, (x, y), 3, (255, 0, 0), -1)
+                
+        cv2.imwrite('debug_eye_landmarks.jpg', debug_img)
+        
+        # 5. Calculate convex hull for face masking
+        source_hull = cv2.convexHull(source_landmarks.astype(np.int32))
+        target_hull = cv2.convexHull(target_landmarks.astype(np.int32))
+        
+        # 6. Create tight eye region masks to handle eye regions specially
+        left_eye_mask_src = np.zeros(source_img.shape[:2], dtype=np.uint8)
+        right_eye_mask_src = np.zeros(source_img.shape[:2], dtype=np.uint8)
+        left_eye_mask_tgt = np.zeros(target_img.shape[:2], dtype=np.uint8)
+        right_eye_mask_tgt = np.zeros(target_img.shape[:2], dtype=np.uint8)
+        
+        # Draw eye regions with slight padding for better coverage
+        cv2.fillConvexPoly(left_eye_mask_src, self._expand_eye_region(left_eye_src), 255)
+        cv2.fillConvexPoly(right_eye_mask_src, self._expand_eye_region(right_eye_src), 255)
+        cv2.fillConvexPoly(left_eye_mask_tgt, self._expand_eye_region(left_eye_tgt), 255)
+        cv2.fillConvexPoly(right_eye_mask_tgt, self._expand_eye_region(right_eye_tgt), 255)
+        
+        # Combine eye masks
+        eyes_mask_src = cv2.bitwise_or(left_eye_mask_src, right_eye_mask_src)
+        eyes_mask_tgt = cv2.bitwise_or(left_eye_mask_tgt, right_eye_mask_tgt)
+        
+        # Slightly dilate for better coverage
+        eyes_mask_src = cv2.dilate(eyes_mask_src, None, iterations=2)
+        eyes_mask_tgt = cv2.dilate(eyes_mask_tgt, None, iterations=2)
+        
+        # Save eye masks for debugging
+        cv2.imwrite('debug_eyes_mask.jpg', eyes_mask_tgt)
+        
+        # 7. Create face masks
+        source_mask = np.zeros(source_img.shape[:2], dtype=np.uint8)
+        target_mask = np.zeros(target_img.shape[:2], dtype=np.uint8)
+        
+        cv2.fillConvexPoly(source_mask, source_hull, 255)
+        cv2.fillConvexPoly(target_mask, target_hull, 255)
+        
+        # 8. Create better feathered edge for the mask
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+        target_mask_dilated = cv2.dilate(target_mask, kernel, iterations=1)
+        target_mask_feathered = cv2.GaussianBlur(target_mask_dilated, (21, 21), 11)
+        
+        # 9. Delaunay triangulation
+        rect = cv2.boundingRect(target_landmarks.astype(np.int32))
         subdiv = cv2.Subdiv2D(rect)
         
-        # Add points to subdivision
-        points = np.array(target_landmarks, np.int32)
-        for point in points:
-            subdiv.insert((int(point[0]), int(point[1])))
+        for point in target_landmarks:
+            subdiv.insert(tuple(map(float, point)))
             
-        # Get triangles and convert to numpy array
         triangles = subdiv.getTriangleList()
-        triangles = np.array(triangles, dtype=np.int32)
-        
-        # Convert triangle indices to point indices
         triangle_indices = []
-        for triangle in triangles:
-            pt1 = (triangle[0], triangle[1])
-            pt2 = (triangle[2], triangle[3])
-            pt3 = (triangle[4], triangle[5])
+        
+        for t in triangles:
+            pt1 = (t[0], t[1])
+            pt2 = (t[2], t[3])
+            pt3 = (t[4], t[5])
             
-            # Find indices of points in landmarks array
-            idx1 = self._find_point_index(points, pt1)
-            idx2 = self._find_point_index(points, pt2)
-            idx3 = self._find_point_index(points, pt3)
+            # Convert triangle points to landmark indices
+            idx1 = self._find_closest_landmark(target_landmarks, pt1)
+            idx2 = self._find_closest_landmark(target_landmarks, pt2)
+            idx3 = self._find_closest_landmark(target_landmarks, pt3)
             
             if idx1 is not None and idx2 is not None and idx3 is not None:
                 triangle_indices.append([idx1, idx2, idx3])
+                
+        print(f"Generated {len(triangle_indices)} triangles using Delaunay triangulation")
         
-        # Warp triangles from source to target
-        result_img = target_img.copy()
-        for triangle_idx in triangle_indices:
-            source_tri = source_landmarks[triangle_idx]
-            target_tri = target_landmarks[triangle_idx]
-            self._warp_triangle(source_img, result_img, source_tri, target_tri)
+        # 10. Initialize result image
+        result_img = np.copy(target_img)
         
-        # Create face mask for seamless cloning
-        hull = cv2.convexHull(target_landmarks)
-        mask = np.zeros(target_img.shape[:2], dtype=np.uint8)
-        cv2.fillConvexPoly(mask, hull, 255)
+        # 11. Transform triangles from source to target, with special handling for eye regions
+        for triangle in triangle_indices:
+            # Check if this triangle is part of an eye region
+            is_eye_triangle = False
+            for idx in triangle:
+                # Eye region landmarks: 36-47
+                if 36 <= idx <= 47:
+                    is_eye_triangle = True
+                    break
+            
+            # Get triangle points
+            source_tri = source_landmarks[triangle]
+            target_tri = target_landmarks[triangle]
+            
+            # Apply special warping for eye triangles to prevent double-eye effect
+            if is_eye_triangle:
+                self._warp_triangle_special(source_img, result_img, source_tri, target_tri, 
+                                           eyes_mask_src, eyes_mask_tgt, higher_precision=True)
+            else:
+                self._warp_triangle(source_img, result_img, source_tri, target_tri)
         
-        # Apply seamless cloning
-        center = (rect[0] + rect[2]//2, rect[1] + rect[3]//2)
-        result_img = cv2.seamlessClone(
-            result_img, target_img, mask, center, cv2.NORMAL_CLONE
-        )
+        # 12. Apply color correction before blending
+        color_corrected = self._match_color_tones(result_img, target_img, target_mask_feathered)
         
-        return result_img
+        # 13. Apply modified seamless cloning for natural blending
+        # Calculate center point avoiding the eyes
+        # Use face landmarks excluding eyes for center calculation
+        face_points = np.vstack([
+            target_landmarks[0:36],  # Jaw and eyebrows
+            target_landmarks[48:]    # Mouth and nose
+        ])
+        center = np.mean(face_points, axis=0).astype(np.int32)
         
-    def _find_point_index(self, points: np.ndarray, point: tuple) -> Optional[int]:
-        """Find index of point in landmarks array"""
-        distances = np.sqrt(np.sum((points - point) ** 2, axis=1))
+        # Create a copy of the target image
+        output = np.copy(target_img)
+        
+        # Create a mask that excludes eyes to avoid double-eye effect
+        blend_mask = cv2.bitwise_and(target_mask_feathered, 
+                                     cv2.bitwise_not(eyes_mask_tgt))
+        
+        # Apply seamless cloning with the modified mask
+        try:
+            output = cv2.seamlessClone(
+                color_corrected, 
+                output, 
+                blend_mask, 
+                tuple(center), 
+                cv2.NORMAL_CLONE
+            )
+        except cv2.error as e:
+            print(f"Seamless cloning failed: {e}")
+            # Fall back to alpha blending
+            alpha = target_mask_feathered.astype(float) / 255.0
+            alpha = np.expand_dims(alpha, axis=2)
+            output = (color_corrected * alpha + target_img * (1 - alpha)).astype(np.uint8)
+        
+        # 14. Special handling for eye regions - use the source eye regions directly
+        # Extract eye regions from source and warp them to target eye positions
+        for src_eye, tgt_eye, eye_mask in [
+            (left_eye_src, left_eye_tgt, left_eye_mask_tgt),
+            (right_eye_src, right_eye_tgt, right_eye_mask_tgt)
+        ]:
+            # Calculate transformation matrix to align eyes
+            src_eye_center = np.mean(src_eye, axis=0)
+            tgt_eye_center = np.mean(tgt_eye, axis=0)
+            
+            # Get eye width and height
+            src_eye_width = np.max(src_eye[:, 0]) - np.min(src_eye[:, 0])
+            tgt_eye_width = np.max(tgt_eye[:, 0]) - np.min(tgt_eye[:, 0])
+            
+            # Calculate scale factor
+            scale = tgt_eye_width / src_eye_width if src_eye_width > 0 else 1.0
+            
+            # Get rotation angle
+            src_angle = np.arctan2(src_eye[3][1] - src_eye[0][1], 
+                                  src_eye[3][0] - src_eye[0][0])
+            tgt_angle = np.arctan2(tgt_eye[3][1] - tgt_eye[0][1], 
+                                  tgt_eye[3][0] - tgt_eye[0][0])
+            angle = tgt_angle - src_angle
+            
+            # Create transformation matrix
+            rotation_matrix = cv2.getRotationMatrix2D(
+                tuple(src_eye_center), angle * 180 / np.pi, scale)
+            
+            # Add translation
+            rotation_matrix[0, 2] += tgt_eye_center[0] - src_eye_center[0]
+            rotation_matrix[1, 2] += tgt_eye_center[1] - src_eye_center[1]
+            
+            # Extract eye region with some margin
+            margin = 5  # Adjust this value as needed
+            x_min, y_min = np.min(src_eye, axis=0) - margin
+            x_max, y_max = np.max(src_eye, axis=0) + margin
+            
+            # Ensure coordinates are within image bounds
+            x_min = max(0, int(x_min))
+            y_min = max(0, int(y_min))
+            x_max = min(source_img.shape[1], int(x_max))
+            y_max = min(source_img.shape[0], int(y_max))
+            
+            if x_max <= x_min or y_max <= y_min:
+                continue  # Skip if eye region is invalid
+                
+            # Extract eye region
+            eye_region = source_img[y_min:y_max, x_min:x_max]
+            
+            # Warp eye region
+            warped_eye = cv2.warpAffine(
+                source_img, rotation_matrix, 
+                (target_img.shape[1], target_img.shape[0]),
+                flags=cv2.INTER_LANCZOS4,
+                borderMode=cv2.BORDER_REPLICATE
+            )
+            
+            # Apply eye mask for smooth blending
+            eye_mask_blurred = cv2.GaussianBlur(eye_mask, (5, 5), 2)
+            eye_blend_mask = np.expand_dims(eye_mask_blurred.astype(float) / 255.0, axis=2)
+            
+            # Blend warped eye into output
+            output = (warped_eye * eye_blend_mask + 
+                     output * (1 - eye_blend_mask)).astype(np.uint8)
+        
+        # Create final debug visualization
+        debug_final = output.copy()
+        for point in target_landmarks:
+            x, y = int(point[0]), int(point[1])
+            cv2.circle(debug_final, (x, y), 2, (0, 255, 0), -1)
+        
+        # Highlight eye landmarks
+        for eye_points in [left_eye_tgt, right_eye_tgt]:
+            for point in eye_points:
+                x, y = int(point[0]), int(point[1])
+                cv2.circle(debug_final, (x, y), 3, (0, 0, 255), -1)
+                
+        cv2.imwrite('debug_enhanced_final.jpg', debug_final)
+        
+        print("Enhanced face swap with eye region handling completed successfully")
+        return output
+        
+    def _expand_eye_region(self, eye_points, padding=3):
+        """Expand eye region by adding padding to ensure full coverage"""
+        # Calculate eye center
+        eye_center = np.mean(eye_points, axis=0)
+        
+        # Expand points outward from center
+        expanded_points = []
+        for point in eye_points:
+            # Vector from center to point
+            vector = point - eye_center
+            # Normalize vector
+            length = np.sqrt(np.sum(vector ** 2))
+            if length > 0:
+                unit_vector = vector / length
+                # Expand point outward
+                expanded_point = point + unit_vector * padding
+                expanded_points.append(expanded_point)
+            else:
+                expanded_points.append(point)
+                
+        return np.array(expanded_points, dtype=np.int32)
+        
+    def _find_closest_landmark(self, landmarks, point):
+        """Find the closest landmark index to a given point"""
+        distances = np.sqrt(np.sum((landmarks - point) ** 2, axis=1))
         min_dist_idx = np.argmin(distances)
-        if distances[min_dist_idx] < 1:  # Threshold for point matching
+        
+        # Use a threshold to ensure accurate matching
+        if distances[min_dist_idx] < 5:
             return min_dist_idx
         return None
         
-    def _warp_triangle(self, 
-                      src_img: np.ndarray, 
-                      dst_img: np.ndarray, 
-                      src_tri: np.ndarray, 
-                      dst_tri: np.ndarray) -> None:
-        """Warp triangular region from source to destination"""
-        # Get bounding box of destination triangle
-        rect = cv2.boundingRect(dst_tri)
+    def _warp_triangle(self, src_img, dst_img, src_tri, dst_tri):
+        """Standard triangle warping for non-eye regions"""
+        # Get bounding rectangle for destination triangle
+        rect = cv2.boundingRect(dst_tri.astype(np.int32))
         (x, y, w, h) = rect
         
-        # Offset points by rect topleft
-        dst_tri_cropped = dst_tri - [x, y]
-        src_tri_cropped = src_tri - [x, y]
+        # Check if rectangle is within image bounds
+        if x < 0 or y < 0 or x + w > dst_img.shape[1] or y + h > dst_img.shape[0]:
+            return
+            
+        # Offset triangles by the rectangular region
+        dst_tri_cropped = np.array([
+            [dst_tri[0][0] - x, dst_tri[0][1] - y],
+            [dst_tri[1][0] - x, dst_tri[1][1] - y],
+            [dst_tri[2][0] - x, dst_tri[2][1] - y]
+        ], dtype=np.float32)
         
-        # Get mask for triangular region
+        src_tri_cropped = np.array([
+            [src_tri[0][0], src_tri[0][1]],
+            [src_tri[1][0], src_tri[1][1]],
+            [src_tri[2][0], src_tri[2][1]]
+        ], dtype=np.float32)
+        
+        # Create mask for destination triangle
         mask = np.zeros((h, w), dtype=np.uint8)
-        cv2.fillConvexPoly(mask, np.int32(dst_tri_cropped), 1)
+        cv2.fillConvexPoly(mask, dst_tri_cropped.astype(np.int32), 255)
         
-        # Apply warp to triangular region
-        warp_mat = cv2.getAffineTransform(
-            np.float32(src_tri_cropped), 
-            np.float32(dst_tri_cropped)
-        )
+        # Warp source triangle to match destination
+        warp_mat = cv2.getAffineTransform(src_tri_cropped, dst_tri_cropped)
+        
+        # Warp the source image
         warped = cv2.warpAffine(
             src_img, 
             warp_mat, 
             (w, h), 
-            None, 
             flags=cv2.INTER_LINEAR, 
-            borderMode=cv2.BORDER_REFLECT_101
+            borderMode=cv2.BORDER_REPLICATE
         )
-        warped = warped * mask[:, :, np.newaxis]
         
-        # Copy triangular region to destination image
-        dst_img[y:y+h, x:x+w] = dst_img[y:y+h, x:x+w] * (1 - mask[:, :, np.newaxis])
-        dst_img[y:y+h, x:x+w] = dst_img[y:y+h, x:x+w] + warped
+        # Apply mask to keep only the triangle region
+        warped_masked = cv2.bitwise_and(warped, warped, mask=mask)
+        
+        # Create inverse mask for the original content
+        mask_inv = cv2.bitwise_not(mask)
+        original_cropped = cv2.bitwise_and(dst_img[y:y+h, x:x+w], dst_img[y:y+h, x:x+w], mask=mask_inv)
+        
+        # Combine original and warped triangles
+        dst_img[y:y+h, x:x+w] = cv2.add(original_cropped, warped_masked)
+        
+    def _warp_triangle_special(self, src_img, dst_img, src_tri, dst_tri, 
+                              src_eye_mask, dst_eye_mask, higher_precision=False):
+        """Special triangle warping for eye regions with precise alignment"""
+        # Get bounding rectangle for destination triangle
+        rect = cv2.boundingRect(dst_tri.astype(np.int32))
+        (x, y, w, h) = rect
+        
+        # Check if rectangle is within image bounds
+        if x < 0 or y < 0 or x + w > dst_img.shape[1] or y + h > dst_img.shape[0]:
+            return
+            
+        # Offset triangles by the rectangular region
+        dst_tri_cropped = np.array([
+            [dst_tri[0][0] - x, dst_tri[0][1] - y],
+            [dst_tri[1][0] - x, dst_tri[1][1] - y],
+            [dst_tri[2][0] - x, dst_tri[2][1] - y]
+        ], dtype=np.float32)
+        
+        src_tri_cropped = np.array([
+            [src_tri[0][0], src_tri[0][1]],
+            [src_tri[1][0], src_tri[1][1]],
+            [src_tri[2][0], src_tri[2][1]]
+        ], dtype=np.float32)
+        
+        # Create mask for destination triangle
+        mask = np.zeros((h, w), dtype=np.uint8)
+        cv2.fillConvexPoly(mask, dst_tri_cropped.astype(np.int32), 255)
+        
+        # For eye regions, check if this triangle is in the eye mask
+        eye_mask_roi = dst_eye_mask[y:y+h, x:x+w] if (y+h <= dst_eye_mask.shape[0] and x+w <= dst_eye_mask.shape[1]) else np.zeros((h, w), dtype=np.uint8)
+        
+        # For triangles in eye regions, use higher precision warping
+        if higher_precision:
+            flags = cv2.INTER_CUBIC
+        else:
+            flags = cv2.INTER_LINEAR
+        
+        # Warp source triangle to match destination
+        try:
+            warp_mat = cv2.getAffineTransform(src_tri_cropped, dst_tri_cropped)
+            
+            # Warp the source image
+            warped = cv2.warpAffine(
+                src_img, 
+                warp_mat, 
+                (w, h), 
+                flags=flags, 
+                borderMode=cv2.BORDER_REPLICATE
+            )
+            
+            # Apply mask to keep only the triangle region
+            warped_masked = cv2.bitwise_and(warped, warped, mask=mask)
+            
+            # Create inverse mask for the original content
+            mask_inv = cv2.bitwise_not(mask)
+            original_cropped = cv2.bitwise_and(dst_img[y:y+h, x:x+w], dst_img[y:y+h, x:x+w], mask=mask_inv)
+            
+            # Check if this area overlaps with an eye region
+            if np.sum(eye_mask_roi) > 0:
+                # Use alpha blending for smoother transition in eye regions
+                alpha_mask = mask.astype(float) / 255.0
+                alpha_mask = np.expand_dims(alpha_mask, axis=2)
+                
+                # Modify alpha for eye regions - reduce visibility of source
+                if higher_precision:
+                    # Reduce the alpha value for smoother blending in eye regions
+                    eye_mask_roi_norm = eye_mask_roi.astype(float) / 255.0
+                    eye_mask_roi_norm = np.expand_dims(eye_mask_roi_norm, axis=2)
+                    
+                    # Scale alpha to prevent double-eyes
+                    alpha_mask = alpha_mask * (1.0 - eye_mask_roi_norm * 0.5)
+                
+                # Blend using modified alpha
+                blended = warped_masked * alpha_mask + dst_img[y:y+h, x:x+w] * (1.0 - alpha_mask)
+                dst_img[y:y+h, x:x+w] = blended.astype(np.uint8)
+            else:
+                # For non-eye regions, use standard addition
+                dst_img[y:y+h, x:x+w] = cv2.add(original_cropped, warped_masked)
+                
+        except cv2.error:
+            # Skip triangles that cause errors
+            pass
+            
+    def _match_color_tones(self, source, target, mask):
+        """Match color tones between source and target images"""
+        # Convert to LAB color space for better color matching
+        source_lab = cv2.cvtColor(source, cv2.COLOR_BGR2LAB)
+        target_lab = cv2.cvtColor(target, cv2.COLOR_BGR2LAB)
+        
+        # Split the LAB images into their channels
+        ls, as_, bs = cv2.split(source_lab)
+        lt, at, bt = cv2.split(target_lab)
+        
+        # Calculate mean and std for each channel
+        for src, tgt in [(ls, lt), (as_, at), (bs, bt)]:
+            src_mean, src_std = cv2.meanStdDev(src, mask=mask)
+            tgt_mean, tgt_std = cv2.meanStdDev(tgt, mask=mask)
+            
+            # Prevent division by zero
+            if src_std[0][0] > 0:
+                # Apply color correction: new = (old - old_mean) * (tgt_std/src_std) + tgt_mean
+                src[:] = (((src - src_mean[0][0]) * (tgt_std[0][0]/src_std[0][0])) + tgt_mean[0][0])
+        
+        # Merge the channels back
+        corrected_lab = cv2.merge([ls, as_, bs])
+        
+        # Convert back to BGR
+        corrected = cv2.cvtColor(corrected_lab, cv2.COLOR_LAB2BGR)
+        
+        # Use the mask for blending original color with corrected color
+        mask_3ch = np.repeat(np.expand_dims(mask, axis=2), 3, axis=2) / 255.0
+        result = corrected * mask_3ch + source * (1 - mask_3ch)
+        
+        return result.astype(np.uint8)
 
 class StyleTransfer(nn.Module):
     """Neural style transfer for faces"""
@@ -788,10 +1089,11 @@ class ExpressionTransfer:
         self.face_mesh = mp.solutions.face_mesh.FaceMesh(
             static_image_mode=False,
             max_num_faces=1,
-            min_detection_confidence=0.5
+            min_detection_confidence=0.5,
+            refine_landmarks=True
         )
 
-    def extract_expression(self, image: np.ndarray) -> np.ndarray:
+    def extract_expression(self, image: np.ndarray) -> mp.solutions.face_mesh.FaceMesh:
         """Extract facial expression from image"""
         # Ensure image is uint8
         if image.dtype != np.uint8:
@@ -810,14 +1112,20 @@ class ExpressionTransfer:
         else:
             raise ValueError("Image must be BGR/RGB with 3 channels")
 
-        results = self.face_mesh.process(rgb_image)
-        return results
-
+        # Create MediaPipe Image directly from numpy array
+        try:
+            # Process image directly without creating mp.Image
+            results = self.face_mesh.process(rgb_image)
+            return results
+        except Exception as e:
+            print(f"Error processing image: {str(e)}")
+            return None
+    
     def transfer_expression(self, 
-                          source_img: np.ndarray, 
-                          target_img: np.ndarray, 
-                          intensity: float = 1.0) -> np.ndarray:
-        """Transfer expression from source to target"""
+                        source_img: np.ndarray, 
+                        target_img: np.ndarray, 
+                        intensity: float = 1.0) -> np.ndarray:
+        """Transfer expression from source to target with improved implementation"""
         # Convert images to uint8 if needed
         if source_img.dtype != np.uint8:
             source_img = (source_img * 255).clip(0, 255).astype(np.uint8)
@@ -852,7 +1160,7 @@ class ExpressionTransfer:
         
         # Convert landmarks to numpy array for warping
         target_points = np.float32([[lm.x * target_img.shape[1], lm.y * target_img.shape[0]] 
-                                  for lm in target_landmarks])
+                                for lm in target_landmarks])
         modified_points = np.float32([[lm.x * target_img.shape[1], lm.y * target_img.shape[0]] 
                                     for lm in modified_landmarks])
         
@@ -870,37 +1178,127 @@ class ExpressionTransfer:
             return result_img
             
         return target_img
-            
-        # Calculate expression differences
-        expr_diff = {k: (source_expr[k] - target_expr[k]) * intensity 
-                    for k in source_expr.keys()}
-        
-        # Apply expression differences to target landmarks
-        results = self.face_mesh.process(cv2.cvtColor(target_img, cv2.COLOR_BGR2RGB))
-        if not results.multi_face_landmarks:
-            return target_img
-            
-        landmarks = results.multi_face_landmarks[0].landmark
-        modified_landmarks = self._apply_expression_diff(landmarks, expr_diff)
-        
-        # Warp target image according to modified landmarks
-        return self._warp_image(target_img, landmarks, modified_landmarks)
     
     def _calculate_smile_intensity(self, landmarks) -> float:
-        # Implementation of smile intensity calculation
-        pass
-    
+        """
+        Calculate smile intensity based on mouth corner positions and curvature.
+        Returns a value between 0.0 (no smile) and 1.0 (maximum smile).
+        """
+        # Mouth corner indices (left: 61, right: 291)
+        left_corner = landmarks[61]
+        right_corner = landmarks[291]
+        
+        # Center of top lip (middle point: 0)
+        top_lip = landmarks[0]
+        
+        # Calculate vertical distances of corners relative to center
+        left_height = left_corner.y - top_lip.y
+        right_height = right_corner.y - top_lip.y
+        
+        # Calculate mouth width
+        mouth_width = abs(right_corner.x - left_corner.x)
+        
+        # Calculate mouth curvature (average height of corners relative to center)
+        curvature = (left_height + right_height) / 2
+        
+        # Calculate smile ratio (curvature relative to width)
+        smile_ratio = curvature / mouth_width if mouth_width > 0 else 0
+        
+        # Normalize to 0-1 range (empirically determined thresholds)
+        normalized_smile = max(0.0, min(1.0, (smile_ratio + 0.15) / 0.3))
+        
+        return normalized_smile
+
     def _calculate_eye_openness(self, landmarks) -> float:
-        # Implementation of eye openness calculation
-        pass
-    
+        """
+        Calculate eye openness based on vertical distance between eyelids.
+        Returns a value between 0.0 (closed) and 1.0 (fully open).
+        """
+        # Left eye indices (top: 159, bottom: 145)
+        left_eye_top = landmarks[159]
+        left_eye_bottom = landmarks[145]
+        
+        # Right eye indices (top: 386, bottom: 374)
+        right_eye_top = landmarks[386]
+        right_eye_bottom = landmarks[374]
+        
+        # Calculate vertical distances
+        left_eye_height = abs(left_eye_top.y - left_eye_bottom.y)
+        right_eye_height = abs(right_eye_top.y - right_eye_bottom.y)
+        
+        # Calculate eye widths for normalization
+        left_eye_width = abs(landmarks[133].x - landmarks[33].x)
+        right_eye_width = abs(landmarks[362].x - landmarks[263].x)
+        
+        # Calculate openness ratios
+        left_ratio = left_eye_height / left_eye_width if left_eye_width > 0 else 0
+        right_ratio = right_eye_height / right_eye_width if right_eye_width > 0 else 0
+        
+        # Average the ratios and normalize to 0-1 range
+        avg_ratio = (left_ratio + right_ratio) / 2
+        normalized_openness = max(0.0, min(1.0, avg_ratio / 0.35))
+        
+        return normalized_openness
+
     def _calculate_mouth_openness(self, landmarks) -> float:
-        # Implementation of mouth openness calculation
-        pass
-    
+        """
+        Calculate mouth openness based on vertical distance between lips.
+        Returns a value between 0.0 (closed) and 1.0 (fully open).
+        """
+        # Upper lip indices (middle: 13)
+        upper_lip = landmarks[13]
+        
+        # Lower lip indices (middle: 14)
+        lower_lip = landmarks[14]
+        
+        # Mouth corners for width reference
+        left_corner = landmarks[61]
+        right_corner = landmarks[291]
+        
+        # Calculate vertical distance between lips
+        mouth_height = abs(upper_lip.y - lower_lip.y)
+        
+        # Calculate mouth width for normalization
+        mouth_width = abs(right_corner.x - left_corner.x)
+        
+        # Calculate openness ratio
+        openness_ratio = mouth_height / mouth_width if mouth_width > 0 else 0
+        
+        # Normalize to 0-1 range
+        normalized_openness = max(0.0, min(1.0, openness_ratio / 0.7))
+        
+        return normalized_openness
+
     def _calculate_brow_raise(self, landmarks) -> float:
-        # Implementation of brow raise calculation
-        pass
+        """
+        Calculate eyebrow raise intensity based on distance from eyes.
+        Returns a value between 0.0 (neutral) and 1.0 (maximum raise).
+        """
+        # Left eyebrow keypoints (middle: 52)
+        left_brow = landmarks[52]
+        left_eye = landmarks[159]  # Upper eyelid
+        
+        # Right eyebrow keypoints (middle: 282)
+        right_brow = landmarks[282]
+        right_eye = landmarks[386]  # Upper eyelid
+        
+        # Calculate vertical distances between brows and eyes
+        left_distance = abs(left_brow.y - left_eye.y)
+        right_distance = abs(right_brow.y - right_eye.y)
+        
+        # Calculate eye widths for normalization
+        left_eye_width = abs(landmarks[133].x - landmarks[33].x)
+        right_eye_width = abs(landmarks[362].x - landmarks[263].x)
+        
+        # Calculate raise ratios
+        left_ratio = left_distance / left_eye_width if left_eye_width > 0 else 0
+        right_ratio = right_distance / right_eye_width if right_eye_width > 0 else 0
+        
+        # Average the ratios and normalize to 0-1 range
+        avg_ratio = (left_ratio + right_ratio) / 2
+        normalized_raise = max(0.0, min(1.0, (avg_ratio - 0.3) / 0.4))
+        
+        return normalized_raise
 
 class VideoStabilizer:
     """Stabilize video frames"""
@@ -985,7 +1383,7 @@ class AdvancedVideoGenerator(nn.Module):
         self.dense_motion_network = DenseMotionNetwork(config)
         
         # New components
-        self.face_swapper = FaceSwapper()
+        self.face_swapper = EnhancedFaceSwapper()
         self.style_transfer = StyleTransfer()
         self.expression_transfer = ExpressionTransfer()
         self.video_stabilizer = VideoStabilizer()
@@ -1177,44 +1575,57 @@ class AdvancedVideoGenerator(nn.Module):
                 
         return results
     
-    def process_single_frame(self, 
-                           frame: np.ndarray,
-                           expression_intensity: float = 1.0,
-                           enable_stabilization: bool = True) -> np.ndarray:
-        """Process a single frame for real-time use"""
-        # Convert to tensor
-        frame_tensor = torch.from_numpy(frame).float().permute(2, 0, 1).unsqueeze(0)
+    def process_single_frame(self, frame: np.ndarray) -> np.ndarray:
+        """Process a single frame through the pipeline"""
+        # Print frame info for debugging
+        print("Driving Frame Shape:", frame.shape)
         
-        # Detect faces
-        faces = self.multi_face_processor.detect_faces(frame)
+        # Ensure frame is in correct format and size
+        if isinstance(frame, torch.Tensor):
+            frame = frame.cpu().numpy()
         
-        # Process each face
-        processed_frame = frame.copy()
-        for face_idx, face_landmarks in enumerate(faces):
-            if hasattr(self, 'source_image') and face_idx < len(self.source_image):
-                # Apply face swap
-                processed_frame = self.face_swapper.swap_faces(
-                    self.source_image[face_idx],
-                    processed_frame
-                )
-                
-                # Apply expression transfer
-                if expression_intensity > 0:
-                    processed_frame = self.expression_transfer.transfer_expression(
-                        self.source_image[face_idx],
-                        processed_frame,
-                        expression_intensity
-                    )
+        if len(frame.shape) == 4:
+            frame = frame.squeeze(0)
+        if frame.shape[0] == 3:
+            frame = np.transpose(frame, (1, 2, 0))
         
-        # Apply style transfer if enabled
-        if self.current_style_image is not None:
-            processed_frame = self._apply_style_transfer(processed_frame)
+        # Resize if needed
+        target_size = (256, 256)
+        if frame.shape[:2] != target_size:
+            frame = cv2.resize(frame, target_size)
         
-        # Apply stabilization if enabled
-        if enable_stabilization:
-            processed_frame = self.video_stabilizer.stabilize_frame(
-                processed_frame
-            )
+        # Ensure uint8 type for MediaPipe
+        if frame.dtype != np.uint8:
+            if frame.max() <= 1.0:
+                frame = (frame * 255).clip(0, 255).astype(np.uint8)
+        
+        # Ensure we have a valid source image
+        if not hasattr(self, 'source_image') or self.source_image is None:
+            print("Error: No source image available")
+            return frame
+            
+        if isinstance(self.source_image, list):
+            source_img = self.source_image[0]  # Use first source image
+        else:
+            source_img = self.source_image
+            
+        # Convert source image if needed
+        if isinstance(source_img, torch.Tensor):
+            source_img = source_img.cpu().numpy()
+            if source_img.shape[0] == 3:
+                source_img = np.transpose(source_img, (1, 2, 0))
+            if source_img.max() <= 1.0:
+                source_img = (source_img * 255).astype(np.uint8)
+        
+        # Apply face swapping
+        if self.face_swapper is not None:
+            try:
+                processed_frame = self.face_swapper.swap_faces(source_img, frame)
+            except Exception as e:
+                print(f"Face swapping failed: {str(e)}")
+                processed_frame = frame
+        else:
+            processed_frame = frame
         
         return processed_frame
     
@@ -1325,7 +1736,7 @@ def main():
     
     generator = AdvancedVideoGenerator(config)
     
-    use_webcam = True  # Set to True for webcam testing
+    use_webcam = False # Set to True for webcam testing
    
     if use_webcam:
         cap = cv2.VideoCapture(0)
@@ -1338,13 +1749,18 @@ def main():
             if source_img is None:
                 raise FileNotFoundError("Could not load source.jpg")
             
+            print("Loading source image...")
+            print(f"Source image shape: {source_img.shape}")
+            
             # Process source image
             source_img = cv2.resize(source_img, (256, 256))
             source_img = cv2.cvtColor(source_img, cv2.COLOR_BGR2RGB)
             source_img = source_img.astype(np.uint8)  # Ensure uint8 type
             
+            print(f"Processed source image shape: {source_img.shape}, dtype: {source_img.dtype}")
+            
             # Start real-time processing with source image
-            generator.start_real_time([source_img])  # Pass numpy array directly
+            generator.source_image = source_img  # Set source image directly
             
             print("Starting real-time processing. Press 'q' to quit.")
             
@@ -1379,58 +1795,91 @@ def main():
     
     else:
         # Static image processing
-        try:
-            source_img = cv2.imread('source.jpg')
-            driving_img = cv2.imread('driving.jpg')
-            
-            if source_img is None or driving_img is None:
-                raise FileNotFoundError("Could not load source.jpg or driving.jpg")
-            
-            # Process images consistently
-            target_size = (256, 256)
-            source_img = cv2.resize(source_img, target_size)
-            driving_img = cv2.resize(driving_img, target_size)
-            
-            # Convert to RGB
-            source_img = cv2.cvtColor(source_img, cv2.COLOR_BGR2RGB)
-            driving_img = cv2.cvtColor(driving_img, cv2.COLOR_BGR2RGB)
-            
-            # Convert to tensors [0-1] range
-            source_tensor = torch.from_numpy(source_img).float().permute(2, 0, 1).unsqueeze(0) / 255.0
-            driving_tensor = torch.from_numpy(driving_img).float().permute(2, 0, 1).unsqueeze(0) / 255.0
-            
-            print("Processing images...")
-            print(f"Source tensor shape: {source_tensor.shape}")
-            print(f"Driving tensor shape: {driving_tensor.shape}")
-            
-            results = generator(
-                source_images=source_tensor,
-                driving_frames=[driving_tensor],
-                expression_intensity=0.8,
-                enable_stabilization=True,
-                swap_faces=True
-            )
-            
-            if results['frames']:
-                processed_frame = results['frames'][0]
-                if isinstance(processed_frame, torch.Tensor):
-                    processed_frame = processed_frame.cpu().numpy()
-                processed_frame = (processed_frame * 255).clip(0, 255).astype(np.uint8)
-                processed_bgr = cv2.cvtColor(processed_frame, cv2.COLOR_RGB2BGR)
+        if not use_webcam:
+            try:
+                # Load images
+                source_img = cv2.imread('source.jpg')
+                driving_img = cv2.imread('driving.jpg')
                 
-                # Save the result
-                cv2.imwrite('output.jpg', processed_bgr)
-                print("Result saved as output.jpg")
+                if source_img is None or driving_img is None:
+                    raise FileNotFoundError("Could not load source.jpg or driving.jpg")
                 
-                # Display the result
-                cv2.imshow('Processed Frame', processed_bgr)
-                cv2.waitKey(0)
-                cv2.destroyAllWindows()
+                # Validate faces in both images
+                face_detector = dlib.get_frontal_face_detector()
                 
-        except Exception as e:
-            print(f"Error processing images: {str(e)}")
-            import traceback
-            traceback.print_exc()
+                # Check source image
+                source_gray = cv2.cvtColor(source_img, cv2.COLOR_BGR2GRAY)
+                source_faces = face_detector(source_gray)
+                if not source_faces:
+                    raise ValueError("No face detected in source.jpg")
+                print(f"Found {len(source_faces)} face(s) in source image")
+                
+                # Check driving image
+                driving_gray = cv2.cvtColor(driving_img, cv2.COLOR_BGR2GRAY)
+                driving_faces = face_detector(driving_gray)
+                if not driving_faces:
+                    raise ValueError("No face detected in driving.jpg")
+                print(f"Found {len(driving_faces)} face(s) in driving image")
+                
+                # Process images consistently
+                target_size = (256, 256)
+                source_img = cv2.resize(source_img, target_size)
+                driving_img = cv2.resize(driving_img, target_size)
+                
+                # Convert to RGB
+                source_img = cv2.cvtColor(source_img, cv2.COLOR_BGR2RGB)
+                driving_img = cv2.cvtColor(driving_img, cv2.COLOR_BGR2RGB)
+                
+                # Save debug images
+                cv2.imwrite('debug_source.jpg', cv2.cvtColor(source_img, cv2.COLOR_RGB2BGR))
+                cv2.imwrite('debug_driving.jpg', cv2.cvtColor(driving_img, cv2.COLOR_RGB2BGR))
+                
+                print("Converting to tensors...")
+                # Convert to tensors [0-1] range
+                source_tensor = torch.from_numpy(source_img).float().permute(2, 0, 1).unsqueeze(0) / 255.0
+                driving_tensor = torch.from_numpy(driving_img).float().permute(2, 0, 1).unsqueeze(0) / 255.0
+                
+                print(f"Source tensor shape: {source_tensor.shape}")
+                print(f"Driving tensor shape: {driving_tensor.shape}")
+                
+                print("Starting face swap...")
+                results = generator(
+                    source_images=source_tensor,
+                    driving_frames=[driving_tensor],
+                    expression_intensity=0.8,
+                    enable_stabilization=True,
+                    swap_faces=True
+                )
+                
+                if results['frames']:
+                    processed_frame = results['frames'][0]
+                    if isinstance(processed_frame, torch.Tensor):
+                        processed_frame = processed_frame.cpu().numpy()
+                    processed_frame = (processed_frame * 255).clip(0, 255).astype(np.uint8)
+                    processed_bgr = cv2.cvtColor(processed_frame, cv2.COLOR_RGB2BGR)
+                    
+                    # Save debug landmarks
+                    if results.get('landmarks'):
+                        debug_img = processed_bgr.copy()
+                        for landmarks in results['landmarks'][0]:
+                            for point in landmarks:
+                                x, y = int(point[0]), int(point[1])
+                                cv2.circle(debug_img, (x, y), 2, (0, 255, 0), -1)
+                        cv2.imwrite('debug_landmarks.jpg', debug_img)
+                    
+                    # Save the result
+                    cv2.imwrite('output.jpg', processed_bgr)
+                    print("Result saved as output.jpg")
+                    
+                    # Display the result
+                    cv2.imshow('Processed Frame', processed_bgr)
+                    cv2.waitKey(0)
+                    cv2.destroyAllWindows()
+                    
+            except Exception as e:
+                print(f"Error processing images: {str(e)}")
+                import traceback
+                traceback.print_exc()
 
 if __name__ == "__main__":
     main()
