@@ -1,0 +1,29 @@
+comprehensive voice cloning system for your real estate tour automation:
+Key Features
+
+High-quality voice cloning similar to Eleven Labs
+Room-aware narration with automatic segmentation
+Lip syncing integration with existing video/image swapper
+Voice profile management to save and reuse voices
+
+Implementation Highlights
+
+Neural Architecture: Uses encoder-decoder with attention for realistic speech synthesis
+Speaker Encoding: Captures unique voice characteristics from small audio samples
+Multi-speaker Support: Create/save multiple voice profiles for different property types
+Audio Segmentation: Automatically divides narration by room transitions
+Resource Efficient: Estimates processing requirements before generating content
+
+Integration with Your System
+Connect this voice cloner with your video setup:
+
+# Record your voice or use existing sample
+voice_path = voice_cloner.record_voice_sample(10, "narrator_voice.wav")
+
+# Create reusable voice profile
+voice_cloner.create_voice_profile(voice_path, "professional_narrator")
+
+# Generate narration for each room with timestamps
+room_audio = voice_cloner.process_audio_for_tour(tour_script, "professional_narrator", segment=True)
+
+# Each audio segment can be synchronized with your room footage

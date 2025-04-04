@@ -1,0 +1,36 @@
+# Audio settings
+sample_rate: 22050
+n_mels: 80
+n_fft: 2048
+hop_length: 256
+win_length: 1024
+f_min: 0
+f_max: 8000
+
+# Model settings
+embedding_dim: 512
+encoder_hidden: 768
+decoder_hidden: 768
+attention_dim: 256
+hidden_size: 768
+prenet_dims: [256, 256]
+postnet_filters: 512
+
+# Training settings
+batch_size: 16
+learning_rate: 0.0003
+weight_decay: 0.000001 
+max_epochs: 1000
+early_stopping_patience: 10
+checkpoint_dir: "checkpoints"
+data_dir: "data"
+device: "cpu"  # use "cuda" if you have a GPU
+num_workers: 4
+
+# HiFi-GAN settings
+use_pretrained_vocoder: true
+vocoder_model: "universal_v1"
+
+# Loss weights
+mel_loss_weight: 1.0
+postnet_loss_weight: 1.0
