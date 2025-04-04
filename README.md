@@ -1,7 +1,21 @@
 ### python3 download_models.py
 
+# Image swapper Torch model
+### wget https://download.pytorch.org/models/vgg19-dcbb9e9d.pth -P ~/.cache/torch/hub/checkpoints/
+## OR 
+### curl -o ~/.cache/torch/hub/checkpoints/vgg19-dcbb9e9d.pth https://download.pytorch.org/models/vgg19-dcbb9e9d.pth
+
+## THEN mv ~/.cache/torch/hub/checkpoints/vgg19-dcbb9e9d.pth /Users/patrick/youtube_video/models/
+
 
 ## python3 core/video_generator.py --source source.jpg --driving driving.mp4 --output /Users/patrick/Desktop/result.mp4 --expression_intensity 0.8 --max_frames 20
+
+## python3 core/video_generator.py --source source.jpg --driving driving.jpg --output /Users/patrick/Desktop/result.jpg 
+
+## bttterresults python3 main.py --source source.jpg --driving driving.jpg --output result.jpg --max_frames 1 --fps 1 --expression_intensity 1.0 --no_stabilization
+
+## python3 main.py --source source.jpg --driving target.jpg --output result.jpg --max_frames 1 --fps 1
+
 
 
 Here's how to use the voice cloning system:
@@ -58,6 +72,8 @@ python voice_cloning_system.py train --epochs 50
 python voice_cloning_system.py profile create --audio my_voice.wav --name narrator
 python voice_cloning_system.py tour --script tour_script.txt --voice narrator --segment
 ```
+
+## for voice_cloner_grok.py 
 # Prepare Dataset:
  python3 voice_cloner/voice_cloner_grok.py prepare \
     --audio_dir ./audio_files \
@@ -93,3 +109,35 @@ python3 voice_cloner/voice_cloner_grok.py realtime \
     --checkpoint /path/to/model.pth \
     --reference_audio /path/to/reference.wav \
     --duration 60
+
+
+## talking_head_animation
+# Create a directory for models
+mkdir -p models
+
+# Download FOMM model
+
+### working
+# Create a Python script to download everything
+cat > download_models.py << 'EOL'
+from updated_model_downloader import PretrainedModelManager
+
+# Download FOMM model
+PretrainedModelManager.download_fomm_model('models/vox-cpk.pth')
+
+# Download config file
+PretrainedModelManager.download_config('config/vox-256.yaml')
+
+# Download Wav2Lip model (optional, only if you want to use audio)
+PretrainedModelManager.download_wav2lip_model('models/wav2lip_gan.pth')
+EOL
+
+# Run the download script
+python download_fofm_model.py
+
+###
+python -c "from talking_head_animation import PretrainedModelManager; PretrainedModelManager.download_fomm_model('models/vox-cpk.pth')"
+
+# Create config directory
+mkdir -p config
+You'll also need the YAML configuration file for the model. Create a file at config/vox-256.yaml with the appropriate configuration (you can find this in the FOMM GitHub repository).

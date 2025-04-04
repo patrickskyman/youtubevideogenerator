@@ -19,6 +19,9 @@ import dlib
 from scipy.spatial import Delaunay
 import kornia
 
+# New path for the VGG19 model
+model_path = "/Users/patrick/youtube_video/models/vgg19-dcbb9e9d.pth"
+
 @dataclass
 class AdvancedVideoConfig:
     """Configuration for AdvancedVideoGenerator"""
@@ -544,25 +547,22 @@ class StyleTransfer(nn.Module):
     """Neural style transfer for faces"""
     def __init__(self):
         super().__init__()
-        # Update VGG19 initialization to use new weights parameter
-        vgg = models.vgg19(weights=models.VGG19_Weights.IMAGENET1K_V1).features
-        self.slice1 = torch.nn.Sequential()
-        self.slice2 = torch.nn.Sequential()
-        self.slice3 = torch.nn.Sequential()
-        self.slice4 = torch.nn.Sequential()
-        self.slice5 = torch.nn.Sequential()
-        
-        for x in range(2):
-            self.slice1.add_module(str(x), vgg[x])
-        for x in range(2, 7):
-            self.slice2.add_module(str(x), vgg[x])
-        for x in range(7, 12):
-            self.slice3.add_module(str(x), vgg[x])
-        for x in range(12, 21):
-            self.slice4.add_module(str(x), vgg[x])
-        for x in range(21, 30):
-            self.slice5.add_module(str(x), vgg[x])
-            
+
+        # Load VGG19 model from local file
+        vgg19 = models.vgg19()  
+        vgg19.load_state_dict(torch.load(model_path))  # Load the pre-trained weights
+        vgg19 = vgg19.features  # Extract only feature layers
+
+        # Ensure the model is in evaluation mode
+        vgg19.eval()
+
+        # Now correctly reference vgg19 instead of 'vgg'
+        self.slice1 = nn.Sequential(*[vgg19[x] for x in range(2)])
+        self.slice2 = nn.Sequential(*[vgg19[x] for x in range(2, 7)])
+        self.slice3 = nn.Sequential(*[vgg19[x] for x in range(7, 12)])
+        self.slice4 = nn.Sequential(*[vgg19[x] for x in range(12, 21)])
+        self.slice5 = nn.Sequential(*[vgg19[x] for x in range(21, 30)])
+
         for param in self.parameters():
             param.requires_grad = False
             
