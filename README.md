@@ -7,6 +7,32 @@
 
 ## THEN mv ~/.cache/torch/hub/checkpoints/vgg19-dcbb9e9d.pth /Users/patrick/youtube_video/models/
 
+## python3 talking_image_animation.py --source_image driving.jpg --audio my_voice.mp3 --output output.mp4
+
+## python3 core/talking_image_animation_old.py --source_image driving.jpg --audio my_voice.wav --output output.mp4
+
+## python3 talking_image_animation.py \
+  --source_image path/to/source_image.jpg \
+  --audio path/to/audio.mp3 \
+  --output path/to/output.mp4 \
+  --background path/to/background.jpg \
+  --no_head_movement
+
+# without head movements python3 talking_image_animation.py \
+  --source_image portrait.jpg \
+  --audio speech.mp3 \
+  --output animated_video.mp4 \
+  --no_head_movement
+
+# with background image python3 talking_image_animation.py \
+  --source_image portrait.jpg \
+  --audio speech.mp3 \
+  --output animated_video.mp4 \
+  --background background.jpg
+# with basic animations python3 talking_image_animation.py \
+  --source_image portrait.jpg \
+  --audio speech.mp3 \
+  --output animated_video.mp4
 
 ## python3 core/video_generator.py --source source.jpg --driving driving.mp4 --output /Users/patrick/Desktop/result.mp4 --expression_intensity 0.8 --max_frames 20
 
@@ -14,7 +40,7 @@
 
 ## bttterresults python3 main.py --source source.jpg --driving driving.jpg --output result.jpg --max_frames 1 --fps 1 --expression_intensity 1.0 --no_stabilization
 
-## python3 main.py --source source.jpg --driving target.jpg --output result.jpg --max_frames 1 --fps 1
+## python3 main.py --source source.jpg --driving driving.jpg --output result.mp4 --max_frames 1 --fps 1
 
 
 
@@ -141,3 +167,17 @@ python -c "from talking_head_animation import PretrainedModelManager; Pretrained
 # Create config directory
 mkdir -p config
 You'll also need the YAML configuration file for the model. Create a file at config/vox-256.yaml with the appropriate configuration (you can find this in the FOMM GitHub repository).
+
+
+## python3 core/animate_face.py --video_path input_video.mp4 --audio_path speech_audio.wav --output_path outputt_video.mp4 --wav2lip_model models/wav2lip.pth
+
+### 
+python3 core/new_face_animation_system_rule_based.py \
+--video_path input_video.mp4 \
+--audio_path speech_audio.wav \
+--output_path animated_output.mp4
+
+python3 core/new_face_animation_system_rule_based.py \
+--video_path input_video.mp4 \
+--audio_path speech_audio.wav \
+--output_path animated_output.mp4

@@ -68,6 +68,7 @@ Pygments==2.19.1
 PyMatting==1.1.13
 pyparsing==3.2.3
 PySocks==1.7.1
+PySoundFile==0.9.0.post1
 python-dateutil==2.9.0.post0
 pytz==2025.2
 PyYAML==6.0.2

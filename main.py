@@ -176,7 +176,7 @@ def save_video(frames: List[np.ndarray], output_path: str, fps: int = 30):
     height, width = frames[0].shape[:2]
     
     # Create video writer
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    fourcc = cv2.VideoWriter_fourcc(*'avc1')
     video_writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
     
     # Write frames
@@ -244,5 +244,14 @@ def main():
     
     print("Video generation complete.")
 
+    is_image_to_image = args.driving.lower().endswith(('.jpg', '.jpeg', '.png')) and len(generated_frames) == 1
+
+    if is_image_to_image and args.output.lower().endswith(('.jpg', '.jpeg', '.png')):
+        # Save as a static image instead of video
+        cv2.imwrite(args.output, generated_frames[0])
+        print(f"Static image saved to {args.output}")
+    else:
+        # Original video saving code
+        save_video(generated_frames, args.output, args.fps)
 if __name__ == "__main__":
     main()

@@ -18,9 +18,9 @@ import kornia
 import torch.nn.functional as F
 import torch.nn as nn
 # Update AdvancedVideoGenerator class
-from essentials import AdvancedVideoConfig, BackgroundProcessor, DenseMotionNetwork, ExpressionTransfer, FaceMeshDetector, FrameInterpolator, KeypointDetector, MultiFaceProcessor, QualityAssessor, QualityMetrics, RealTimeProcessor, StyleTransfer
-from essentials import VideoStabilizer
-from enhanced_face_swapper import EnhancedFaceSwapper
+from .essentials import AdvancedVideoConfig, BackgroundProcessor, DenseMotionNetwork, ExpressionTransfer, FaceMeshDetector, FrameInterpolator, KeypointDetector, MultiFaceProcessor, QualityAssessor, QualityMetrics, RealTimeProcessor, StyleTransfer
+from .essentials import VideoStabilizer
+from .enhanced_face_swapper import EnhancedFaceSwapper
 
 class AdvancedVideoGenerator(nn.Module):
     """Advanced video generation with face swapping, style transfer, and stabilization"""
