@@ -1,5 +1,5 @@
 ### python3 download_models.py
-
+```bash
 # Image swapper Torch model
 ### wget https://download.pytorch.org/models/vgg19-dcbb9e9d.pth -P ~/.cache/torch/hub/checkpoints/
 ## OR 
@@ -42,25 +42,25 @@
 
 ## python3 main.py --source source.jpg --driving driving.jpg --output result.mp4 --max_frames 1 --fps 1
 
+```
 
-
-Here's how to use the voice cloning system:
+#### Here's how to use the voice cloning system:
 
 1. **Setup** - Install dependencies and create directories:
-   ```bash
+ ```bash
    pip install torch torchaudio librosa soundfile transformers pyaudio matplotlib scipy sklearn
    mkdir -p data/train data/val checkpoints voice_profiles
    ```
 
 2. **Record voice sample**:
-   ```bash
+```bash
    python -c "from voice_cloner.voice_cloning_system import VoiceCloner; VoiceCloner().record_voice_sample(duration=15, output_path='my_voice.wav')"
    ```
    This records 15 seconds of your voice for cloning.
 
 3. **Prepare training data**:
    - Create speaker directories with audiofiles:
-     ```
+```bash
      data/
      ├── your_name/
      │   ├── sample1.wav
@@ -72,17 +72,17 @@ Here's how to use the voice cloning system:
      ```
 
 4. **Train the model**:
-   ```bash
+```bash
    python -c "from voice_cloner.voice_cloning_system import VoiceCloner; VoiceCloner().train(epochs=50)"
    ```
 
 5. **Create voice profile**:
-   ```bash
+```bash
    python -c "from voice_cloner.voice_cloning_system import VoiceCloner; VoiceCloner().create_voice_profile('my_voice.wav', 'narrator')"
    ```
 
 6. **Generate speech for house tour**:
-   ```bash
+```bash
    # Create tour script (rooms separated by "## Room Name")
    echo -e "Welcome to this beautiful property.\n\n## Living Room\nNotice the spacious layout and natural light.\n\n## Kitchen\nThis gourmet kitchen features top appliances." > tour_script.txt
    
@@ -129,13 +129,13 @@ python3 voice_cloner/voice_cloner_grok.py infer \
 python3 voice_cloner/voice_cloner_grok.py evaluate \
     --checkpoint /path/to/model.pth \
     --num_samples 10
-    
+
 # Real-time Conversion
+```bash
 python3 voice_cloner/voice_cloner_grok.py realtime \
     --checkpoint /path/to/model.pth \
     --reference_audio /path/to/reference.wav \
     --duration 60
-
 
 ## talking_head_animation
 # Create a directory for models
@@ -181,3 +181,4 @@ python3 core/new_face_animation_system_rule_based.py \
 --video_path input_video.mp4 \
 --audio_path speech_audio.wav \
 --output_path animated_output.mp4
+```
