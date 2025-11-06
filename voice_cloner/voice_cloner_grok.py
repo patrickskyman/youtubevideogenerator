@@ -54,7 +54,7 @@ except ImportError as e:
     logger.warning(f"HiFi-GAN not found: {e}. Falling back to basic vocoder if needed.")
     HIFIGAN_AVAILABLE = False
 ###test 
-## From your project root
+## From the project root
 # python3 -c "from models.hifigan.models import Generator; print('HiFi-GAN import successful')"
 
 
